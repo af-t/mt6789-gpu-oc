@@ -13,7 +13,7 @@ for f in 1200 1250 1300 1350 1400 1450 1500 1550 1600 1650 1700; do
   mv "$ROOT/src/gpu_uvoc_mt6789.ko" "$ROOT/variants/gpu_uvoc_mt6789_$f.ko"
   sz=$(readelf -SW "$ROOT/variants/gpu_uvoc_mt6789_$f.ko" | awk '/this_module/ && /PROGBITS/{print $6}')
   [ "$sz" = "000640" ] || { echo "VARIANT $f struct size $sz WRONG"; exit 1; }
-  undef=$(nm "$ROOT/variants/gpu_uvoc_mt6789_$f.ko" | grep " U " | grep -v -E " _(printk|fortify_panic)|gpufreq_get_(working_table|opp_num)|module_layout" || true)
+  undef=$(nm "$ROOT/variants/gpu_uvoc_mt6789_$f.ko" | grep " U " | grep -v -E " (_printk|_fortify_panic)|gpufreq_get_(working_table|opp_num)|param_ops_ulong|module_layout" || true)
   [ -z "$undef" ] || { echo "VARIANT $f foreign undef: $undef"; exit 1; }
   echo "OK $f"
 done

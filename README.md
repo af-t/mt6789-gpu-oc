@@ -47,10 +47,24 @@ CI: push / workflow_dispatch -> matrix job builds 11 `.ko` files as Artifacts. B
 su -c 'insmod /sdcard/gpu_uvoc_mt6789.ko'
 cat /proc/gpufreqv2/gpu_working_opp_table | head -n 5  # idx0 must show the OC freq
 echo 0 > /proc/gpufreqv2/fix_target_opp_index          # max-lock test
+cat /sys/kernel/ged/hal/current_freqency               # want: 0 <OC freq>
 # ... check freq, then release:
 echo -1 > /proc/gpufreqv2/fix_target_opp_index
 dmesg | grep -iE "gpufreq.*(fail|error)"               # must be empty
 ```
+
+Full sync (working + GED HAL + signed) needs the runtime BSS bases —
+KASLR re-randomizes them every boot, so they cannot be hardcoded; read
+them after lowering `kptr_restrict` (resets to 2 on reboot):
+
+```sh
+echo 0 > /proc/sys/kernel/kptr_restrict
+insmod /sdcard/gpu_uvoc_mt6789.ko \
+  ged_bss=$(cat /sys/module/ged/sections/.bss) \
+  mt6789_bss=$(cat /sys/module/mtk_gpufreq_mt6789/sections/.bss)
+# dmesg must show: patched + GED tables synced + signed table synced
+```
+Shortcut (does the above + restores kptr_restrict): `sh scripts/insmod-uvoc.sh`
 
 Unload restores the stock table (restore on exit).
 

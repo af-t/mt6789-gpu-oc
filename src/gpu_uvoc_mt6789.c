@@ -11,6 +11,31 @@
 #define ENTRY_U32 6
 #define UV_OFFSET 1250 // -12.5mV mid-stack, hardcoded (no module_param)
 
+// GED BSS offsets (ged.ko from vendor_dlkm, Wild 6.12.38): g_working_table
+// is a boot-time kmalloc copy of the working table that ged_get_freq_by_idx
+// (hence /sys/kernel/ged/hal/current_freqency) reads instead of the live
+// table. Entries are validated against the stock backup before patching, so
+// a ged.ko update that moves these offsets fails safe (GED sync skipped,
+// working patch kept).
+#define GED_BSS_WORKING_OFF 0x9c80
+#define GED_BSS_TOP_OFF 0x9c88
+// Signed table (g_gpu in mtk_gpufreq_mt6789.ko, .bss+0x0): golden table that
+// __gpufreq_freq_scale_gpu scans live for posdiv selection, and what
+// /proc/gpufreqv2/gpu_signed_opp_table displays. Same validate pattern;
+// gpufreq_get_signed_table is NOT exported so direct import fails.
+// NOTE: GKI trims filp_open and protects kernel_read on this kernel, so the
+// BSS bases cannot be resolved from inside the module. Pass them from the
+// root shell, e.g.:
+//   insmod gpu_uvoc.ko ged_bss=$(cat /sys/module/ged/sections/.bss) \
+//     mt6789_bss=$(cat /sys/module/mtk_gpufreq_mt6789/sections/.bss)
+static unsigned long ged_bss;
+module_param(ged_bss, ulong, 0444);
+MODULE_PARM_DESC(ged_bss, "runtime .bss base of ged.ko (0 = skip GED sync)");
+static unsigned long mt6789_bss;
+module_param(mt6789_bss, ulong, 0444);
+MODULE_PARM_DESC(mt6789_bss, "runtime .bss base of mtk_gpufreq_mt6789.ko (0 = skip signed sync)");
+#define SIGNED_BSS_GPU_OFF 0x0
+
 // Official getters from mtk_gpufreq_wrapper_legacy.ko (EXPORT_SYMBOL, no crc
 // under GKI basic-modversions so version-independent). type 1 = GPU.
 extern void *gpufreq_get_working_table(unsigned int type);
@@ -26,6 +51,18 @@ struct opp { u32 freq, volt, vsram, posdiv, margin, power; };
 static struct opp opp_backup[OPP_NUM];
 static void *tbl_addr;
 static bool patched;
+
+// GED-side copies (kmalloc'd at ged_gpufreq_init, 45 x 6 u32 each).
+static struct opp ged_backup[OPP_NUM];
+static struct opp ged_top_backup[OPP_NUM];
+static void *ged_addr;
+static void *ged_top_addr;
+static bool ged_patched;
+
+// Signed table (in-place AVS'd g_default_gpu, 45 x 6 u32).
+static struct opp signed_backup[OPP_NUM];
+static void *signed_addr;
+static bool signed_patched;
 
 static bool uvoc_in_range(u32 f, u32 v, u32 s)
 {
@@ -44,6 +81,9 @@ static u32 dyn_power(u32 f, u32 v)
   u64 b = (u64)v * 100 / 85000;
   return (u32)(a * b * b * 0x3d1 / 1000000);
 }
+
+static void ged_sync_tables(void);
+static void signed_sync_table(void);
 
 static int __init uvoc_init(void)
 {
@@ -116,8 +156,88 @@ static int __init uvoc_init(void)
   patched = true;
   pr_info("[gpu-uvoc] patched: idx0 %u/%u idx1 %u/%u, UV -%d mid-stack\n",
           opp_new[0].freq, opp_new[0].volt, opp_new[1].freq, opp_new[1].volt, UV_OFFSET);
-  pr_info("[gpu-uvoc] verify: cat /proc/gpufreqv2/gpu_working_opp_table; echo 0 > .../fix_target_opp_index for max-lock test\n");
+
+  // GED HAL (/sys/kernel/ged/hal/current_freqency) translates the live idx
+  // through its own boot-time table copies, so mirror the same entries there.
+  // Validation first: both copies must still hold the stock freqs.
+  ged_sync_tables();
+  // Signed table: live posdiv source for freq_scale + procfs display.
+  signed_sync_table();
+  pr_info("[gpu-uvoc] verify: cat /proc/gpufreqv2/gpu_working_opp_table; echo 0 > .../fix_target_opp_index then cat /sys/kernel/ged/hal/current_freqency\n");
   return 0;
+}
+
+// Read a module's runtime section base, e.g. /sys/module/ged/sections/.bss.
+static unsigned long ged_bss_live;
+static unsigned long mt6789_bss_live;
+
+static void ged_sync_tables(void)
+{
+  u32 *g, *gtop;
+  int i, j;
+
+  if (!ged_bss) {
+    pr_info("[gpu-uvoc] GED sync skipped: pass ged_bss=$(cat /sys/module/ged/sections/.bss)\n");
+    return;
+  }
+  ged_bss_live = ged_bss;
+  g = *(u32 **)(ged_bss_live + GED_BSS_WORKING_OFF);
+  gtop = *(u32 **)(ged_bss_live + GED_BSS_TOP_OFF);
+  if (!g || !gtop) {
+    pr_info("[gpu-uvoc] GED sync skipped: null table ptr\n");
+    return;
+  }
+  for (i = 0; i < OPP_NUM; i++) { // must still be the stock table
+    if (g[i * ENTRY_U32 + 0] != ((u32 *)opp_backup)[i * ENTRY_U32 + 0] ||
+        gtop[i * ENTRY_U32 + 0] != ((u32 *)opp_backup)[i * ENTRY_U32 + 0]) {
+      pr_err("[gpu-uvoc] GED sync aborted: entry %d mismatch (ged.ko layout moved?), working patch kept\n", i);
+      return;
+    }
+  }
+  ged_addr = g;
+  ged_top_addr = gtop;
+  for (i = 0; i < OPP_NUM; i++) {
+    for (j = 0; j < ENTRY_U32; j++) {
+      ((u32 *)ged_backup)[i * ENTRY_U32 + j] = g[i * ENTRY_U32 + j];
+      ((u32 *)ged_top_backup)[i * ENTRY_U32 + j] = gtop[i * ENTRY_U32 + j];
+      g[i * ENTRY_U32 + j] = ((u32 *)opp_new)[i * ENTRY_U32 + j];
+      gtop[i * ENTRY_U32 + j] = ((u32 *)opp_new)[i * ENTRY_U32 + j];
+    }
+  }
+  ged_patched = true;
+  pr_info("[gpu-uvoc] GED tables synced (idx0 %u)\n", opp_new[0].freq);
+}
+
+static void signed_sync_table(void)
+{
+  u32 *s;
+  int i, j;
+
+  if (!mt6789_bss) {
+    pr_info("[gpu-uvoc] signed sync skipped: pass mt6789_bss=$(cat /sys/module/mtk_gpufreq_mt6789/sections/.bss)\n");
+    return;
+  }
+  mt6789_bss_live = mt6789_bss;
+  s = *(u32 **)(mt6789_bss_live + SIGNED_BSS_GPU_OFF);
+  if (!s) {
+    pr_info("[gpu-uvoc] signed sync skipped: null table ptr\n");
+    return;
+  }
+  for (i = 0; i < OPP_NUM; i++) { // must still be the stock table
+    if (s[i * ENTRY_U32 + 0] != ((u32 *)opp_backup)[i * ENTRY_U32 + 0]) {
+      pr_err("[gpu-uvoc] signed sync aborted: entry %d mismatch (mtk_gpufreq_mt6789.ko layout moved?), working+GED patch kept\n", i);
+      return;
+    }
+  }
+  signed_addr = s;
+  for (i = 0; i < OPP_NUM; i++) {
+    for (j = 0; j < ENTRY_U32; j++) {
+      ((u32 *)signed_backup)[i * ENTRY_U32 + j] = s[i * ENTRY_U32 + j];
+      s[i * ENTRY_U32 + j] = ((u32 *)opp_new)[i * ENTRY_U32 + j];
+    }
+  }
+  signed_patched = true;
+  pr_info("[gpu-uvoc] signed table synced (idx0 %u)\n", opp_new[0].freq);
 }
 
 static void __exit uvoc_exit(void)
@@ -131,6 +251,27 @@ static void __exit uvoc_exit(void)
         t[i * ENTRY_U32 + j] = ((u32 *)opp_backup)[i * ENTRY_U32 + j];
     }
     pr_info("[gpu-uvoc] working table restored\n");
+  }
+  if (ged_patched) {
+    int j;
+    u32 *g = (u32 *)ged_addr; // manual restore
+    u32 *gtop = (u32 *)ged_top_addr;
+    for (i = 0; i < OPP_NUM; i++) {
+      for (j = 0; j < ENTRY_U32; j++) {
+        g[i * ENTRY_U32 + j] = ((u32 *)ged_backup)[i * ENTRY_U32 + j];
+        gtop[i * ENTRY_U32 + j] = ((u32 *)ged_top_backup)[i * ENTRY_U32 + j];
+      }
+    }
+    pr_info("[gpu-uvoc] GED tables restored\n");
+  }
+  if (signed_patched) {
+    int j;
+    u32 *s = (u32 *)signed_addr; // manual restore
+    for (i = 0; i < OPP_NUM; i++) {
+      for (j = 0; j < ENTRY_U32; j++)
+        s[i * ENTRY_U32 + j] = ((u32 *)signed_backup)[i * ENTRY_U32 + j];
+    }
+    pr_info("[gpu-uvoc] signed table restored\n");
   }
 }
 

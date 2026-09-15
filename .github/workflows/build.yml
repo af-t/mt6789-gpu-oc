@@ -49,7 +49,7 @@ jobs:
           modinfo src/gpu_uvoc_mt6789.ko || true
           sz=$(readelf -SW src/gpu_uvoc_mt6789.ko | awk '/this_module/ && /PROGBITS/{print $6}')
           [ "$sz" = "000640" ] || { echo "struct size $sz != 000640, will NOT load on Wild"; exit 1; }
-          undef=$(nm src/gpu_uvoc_mt6789.ko | grep " U " | grep -v -E " _(printk|fortify_panic)|gpufreq_get_(working_table|opp_num)|module_layout" || true)
+          undef=$(nm src/gpu_uvoc_mt6789.ko | grep " U " | grep -v -E " (_printk|_fortify_panic)|gpufreq_get_(working_table|opp_num)|param_ops_ulong|module_layout" || true)
           [ -z "$undef" ] || { echo "foreign undef: $undef"; exit 1; }
           # exit ptr must sit at 0x5f8 in __this_module (BTF-on layout).
           # At 0x5e0 (BTF-off layout) the phone reads NULL -> [permanent], rmmod EBUSY.
