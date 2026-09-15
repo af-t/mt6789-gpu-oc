@@ -15,7 +15,7 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev libdwarf-dev \
             dwarves clang lld llvm git make gcc-aarch64-linux-gnu
 
       - name: Clone GKI common (android16-6.12-2025-09 = 6.12.38)
@@ -31,15 +31,27 @@ jobs:
         run: |
           cd kernel-common
           make ARCH=arm64 LLVM=1 gki_defconfig
+          # Match target kernel CFI scheme; without this, modules panic on load.
+          ./scripts/config --enable CONFIG_CFI_ICALL_NORMALIZE_INTEGERS
+          make ARCH=arm64 LLVM=1 olddefconfig
           make ARCH=arm64 LLVM=1 -j$(nproc) modules_prepare
 
       - name: Build module
         run: |
           python3 tools/gen_opp.py ${{ matrix.freq }} > src/opp_table.h
-          make -C kernel-common ARCH=arm64 LLVM=1 M=$GITHUB_WORKSPACE modules
+          make -C kernel-common ARCH=arm64 LLVM=1 M=$GITHUB_WORKSPACE \
+            KBUILD_EXTRA_SYMBOLS=$GITHUB_WORKSPACE/Extra.symvers KBUILD_MODPOST_WARN=1 modules
           ls -lh src/*.ko
           file src/*.ko
           modinfo src/gpu_uvoc_mt6789.ko || true
+          sz=$(readelf -SW src/gpu_uvoc_mt6789.ko | awk '/this_module/ && /PROGBITS/{print $6}')
+          [ "$sz" = "000640" ] || { echo "struct size $sz != 000640, will NOT load on Wild"; exit 1; }
+          undef=$(nm src/gpu_uvoc_mt6789.ko | grep " U " | grep -v -E " _(printk|fortify_panic)|gpufreq_get_(working_table|opp_num)|module_layout" || true)
+          [ -z "$undef" ] || { echo "foreign undef: $undef"; exit 1; }
+          # exit ptr must sit at 0x5f8 in __this_module (BTF-on layout).
+          # At 0x5e0 (BTF-off layout) the phone reads NULL -> [permanent], rmmod EBUSY.
+          exitoff=$(readelf -r src/gpu_uvoc_mt6789.ko | awk '/rela.gnu.linkonce.this_module/{f=1} f && /cleanup_module/{print $1; exit}')
+          [ "$exitoff" = "0000000005f8" ] || { echo "exit offset $exitoff != 0x5f8, unload will fail on Wild"; exit 1; }
           mkdir -p dist
           mv src/gpu_uvoc_mt6789.ko dist/gpu_uvoc_mt6789_${{ matrix.freq }}.ko
 
