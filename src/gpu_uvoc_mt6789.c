@@ -1,5 +1,5 @@
 // MT6789 GPU UV+OC via working-table patch (option B).
-// Variants 1200-1700MHz (gen_opp.py), UV -1250 mid-stack.
+// Variants 1200-1900MHz (gen_opp.py, V = F*0.682 snapped 625), UV -1250 mid-stack.
 // Method: modify existing entries, OPP_NUM stays 45. No hot-path hooks.
 // Call the wrapper's official getters, patch on init (GPU idle), restore on exit.
 #include <linux/module.h>
@@ -68,9 +68,9 @@ static bool uvoc_in_range(u32 f, u32 v, u32 s)
 {
   if (f < 187500 || f > 1900000)
     return false;
-  if (v < 50000 || v > 129300)
+  if (v < 50000 || v > 129696) // regulator max 0x13BB45 uV / 10, abort above
     return false;
-  if (s < 75000 || s > 129300)
+  if (s < 75000 || s > 129696)
     return false;
   return true;
 }
