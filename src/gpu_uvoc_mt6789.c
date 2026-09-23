@@ -128,9 +128,10 @@ static int __init uvoc_init(void)
     opp_new[i].margin = t[i * ENTRY_U32 + 4];
     opp_new[i].power = dyn_power(f, nv);
   }
-  opp_new[0].power = dyn_power(opp_new[0].freq, opp_new[0].volt);
-  opp_new[1].power = dyn_power(opp_new[1].freq, opp_new[1].volt);
-  opp_new[2].power = dyn_power(opp_new[2].freq, opp_new[2].volt);
+  // whole baked head (top custom + staircase + bridge) has no live
+  // reference, so fill power here; tail already done above.
+  for (i = 0; i < HEAD_NUM; i++)
+    opp_new[i].power = dyn_power(opp_new[i].freq, opp_new[i].volt);
 
   for (i = 0; i < OPP_NUM; i++) {
     if (!uvoc_in_range(opp_new[i].freq, opp_new[i].volt, opp_new[i].vsram)) {
