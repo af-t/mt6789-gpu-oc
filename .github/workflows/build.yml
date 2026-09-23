@@ -30,12 +30,16 @@ jobs:
       - name: Prepare kernel build dir
         run: |
           cd kernel-common
-          make ARCH=arm64 LLVM=1 gki_defconfig
+          make ARCH=arm64 LLVM=1 gki_defconfig -j$(nproc)
           # Match target kernel CFI scheme; without this, modules panic on load.
           ./scripts/config --enable CONFIG_CFI_ICALL_NORMALIZE_INTEGERS
           # Runner has no usable dwarf.h and versions come from Extra.symvers;
           # proven irrelevant to loadability in local builds.
           ./scripts/config --disable CONFIG_GENDWARFKSYMS
+
+          ./scripts/config --disable CONFIG_COMPAT
+          ./scripts/config --disable CONFIG_COMPAT_VDSO
+
           make ARCH=arm64 LLVM=1 olddefconfig
           make ARCH=arm64 LLVM=1 -j$(nproc) modules_prepare
 
